@@ -1,0 +1,8 @@
+# Compiler Sources #
+####################
+*.swp
+*.log*
+*.o
+Application
+
+
