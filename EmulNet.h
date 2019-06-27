@@ -96,4 +96,5 @@ public:
 	int ENcleanup();
 };
 
+
 #endif /* _EMULNET_H_ */

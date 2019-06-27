@@ -218,3 +218,4 @@ int EmulNet::ENcleanup() {
 	fclose(file);
 	return 0;
 }
+
