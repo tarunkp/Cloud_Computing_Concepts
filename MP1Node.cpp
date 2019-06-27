@@ -7,6 +7,31 @@
 
 #include "MP1Node.h"
 
+
+/**
+ * Function to make address from id and port.
+ * The class Address does not provide this basic functionality, so this function is needed.
+ * Object of MemberListEntry stores address in form of id and port.
+ * 
+ */
+Address makeAddress(int id, short port) {
+	Address address;
+	*(int *)(&address.addr[0]) = id;
+	*(short *)(&address.addr[4]) = port;
+	return address;
+}
+
+void getIdPortInfo(Address& address, int& id, short& port) {
+	id = *(int *)(&address.addr[0]);
+	port = *(short *)(&address.addr[4]);
+}
+
+/*
+Address myAddress(Member *node) {
+	makeAddress(node->addr.addr
+}
+*/
+
 /*
  * Note: You can change/add any functions in MP1Node.{h,cpp}
  */
@@ -31,6 +56,26 @@ MP1Node::MP1Node(Member *member, Params *params, EmulNet *emul, Log *log, Addres
  * Destructor of the MP1Node class
  */
 MP1Node::~MP1Node() {}
+
+/** 
+ * These ifdef' are ugly in the code, so adding a wrapper over the log function.
+ */
+void MP1Node::DbgLog(Address *addr, const char* msg) {
+#ifdef DEBUGLOG
+	log->LOG(addr, msg);
+#endif
+}
+
+int MP1Node::getMembTableEntry(Address addr) {
+	/*
+	long long key = 0;
+	*(Address*)key = addr;
+	if(addr2IdxHT.count(key)) {
+		return addr2IdxHT[key];
+	}
+	*/
+	return -1;
+}
 
 /**
  * FUNCTION NAME: recvLoop
@@ -70,17 +115,13 @@ void MP1Node::nodeStart(char *servaddrstr, short servport) {
 
     // Self booting routines
     if( initThisNode(&joinaddr) == -1 ) {
-#ifdef DEBUGLOG
-        log->LOG(&memberNode->addr, "init_thisnode failed. Exit.");
-#endif
+	DbgLog(&memberNode->addr, "init_thisnode failed. Exit.");
         exit(1);
     }
 
     if( !introduceSelfToGroup(&joinaddr) ) {
         finishUpThisNode();
-#ifdef DEBUGLOG
-        log->LOG(&memberNode->addr, "Unable to join self to group. Exiting.");
-#endif
+	DbgLog(&memberNode->addr, "Unable to join self to group. Exiting.");
         exit(1);
     }
 
@@ -96,8 +137,10 @@ int MP1Node::initThisNode(Address *joinaddr) {
 	/*
 	 * This function is partially implemented and may require changes
 	 */
+	/* Unused variables
 	int id = *(int*)(&memberNode->addr.addr);
 	int port = *(short*)(&memberNode->addr.addr[4]);
+	*/
 
 	memberNode->bFailed = false;
 	memberNode->inited = true;
@@ -112,41 +155,86 @@ int MP1Node::initThisNode(Address *joinaddr) {
     return 0;
 }
 
+bool makeHeartbeatMsgEntryInPlace(HeartbeatEntry* entry, Address& addr, long heartbeat) {
+	int id; short port;
+	getIdPortInfo(addr, id, port);
+	entry->id = id;
+	entry->port = port;
+	entry->heartbeat = heartbeat;
+	//memcpy((char *)entry, &addr.addr, SIZEOF_HEADER);
+	//memcpy((char *)(entry + SIZEOF_HEADER), &heartbeat, SIZEOF_HBENTRY);
+	return true;
+}
+
+bool makeHeartbeatMsgEntryInPlace(HeartbeatEntry* entry, MemberListEntry tblEntry) {
+	entry->id = tblEntry.id;
+	entry->port = tblEntry.port;
+	entry->heartbeat = tblEntry.heartbeat;
+	return true;
+}
+
+/**
+ * This function returns C string containing message for join request.
+ * Caller has responsibility to free memory.
+ */
+char* MP1Node::prepMsgForJoinReq(int& msgLen) {
+	msgLen = SIZEOF_HEADER + SIZEOF_HBENTRY;
+	char *msg = (char *) malloc(msgLen);
+	MessageHdr *header = (MessageHdr *)msg;
+
+	header->msgType = JOINREQ;
+	header->numEntries = 1;
+	char *ptr = msg + SIZEOF_HEADER;
+
+	HeartbeatEntry* entry = (HeartbeatEntry *)(ptr);
+	makeHeartbeatMsgEntryInPlace(entry, memberNode->addr, memberNode->heartbeat);
+	return msg;
+}
+
+char* MP1Node::prepMsgForSharingMemberTable(enum MsgTypes msgType, int& msgLen) {
+	int tableSize = memberNode->memberList.size();
+	msgLen = SIZEOF_HEADER + (tableSize +1) * SIZEOF_HBENTRY;
+	char *msg = (char *) malloc(msgLen);
+	MessageHdr *header = (MessageHdr *)msg;
+	header->msgType = msgType;
+	header->numEntries = tableSize +1;
+
+	char *ptr = msg + SIZEOF_HEADER;
+	HeartbeatEntry* entry = (HeartbeatEntry *)(ptr);
+	makeHeartbeatMsgEntryInPlace(entry, memberNode->addr, memberNode->heartbeat);
+	ptr += SIZEOF_HBENTRY;
+	for(auto& tblEntry : memberNode->memberList) {
+		HeartbeatEntry* entry = (HeartbeatEntry *)(ptr);
+		if(par->getcurrtime() > tblEntry.timestamp + TFAIL) {
+			header->numEntries -= 1;
+			continue;
+		}
+		makeHeartbeatMsgEntryInPlace(entry, tblEntry);
+		ptr += SIZEOF_HBENTRY;
+	}
+
+	msgLen = ptr - msg;
+	return msg;
+}
+
+
 /**
  * FUNCTION NAME: introduceSelfToGroup
  *
  * DESCRIPTION: Join the distributed system
  */
 int MP1Node::introduceSelfToGroup(Address *joinaddr) {
-	MessageHdr *msg;
-#ifdef DEBUGLOG
-    static char s[1024];
-#endif
-
-    if ( 0 == memcmp((char *)&(memberNode->addr.addr), (char *)&(joinaddr->addr), sizeof(memberNode->addr.addr))) {
+    if (memberNode->addr == *joinaddr) {
         // I am the group booter (first process to join the group). Boot up the group
-#ifdef DEBUGLOG
-        log->LOG(&memberNode->addr, "Starting up group...");
-#endif
+	DbgLog(&memberNode->addr, "Starting up group...");
         memberNode->inGroup = true;
     }
     else {
-        size_t msgsize = sizeof(MessageHdr) + sizeof(joinaddr->addr) + sizeof(long) + 1;
-        msg = (MessageHdr *) malloc(msgsize * sizeof(char));
-
-        // create JOINREQ message: format of data is {struct Address myaddr}
-        msg->msgType = JOINREQ;
-        memcpy((char *)(msg+1), &memberNode->addr.addr, sizeof(memberNode->addr.addr));
-        memcpy((char *)(msg+1) + 1 + sizeof(memberNode->addr.addr), &memberNode->heartbeat, sizeof(long));
-
-#ifdef DEBUGLOG
-        sprintf(s, "Trying to join...");
-        log->LOG(&memberNode->addr, s);
-#endif
-
+	DbgLog(&memberNode->addr, "Trying to join...");
         // send JOINREQ message to introducer member
-        emulNet->ENsend(&memberNode->addr, joinaddr, (char *)msg, msgsize);
-
+	int msgLen = 0;
+	char* msg = prepMsgForJoinReq(msgLen);
+        emulNet->ENsend(&memberNode->addr, joinaddr, msg, msgLen);
         free(msg);
     }
 
@@ -163,6 +251,18 @@ int MP1Node::finishUpThisNode(){
    /*
     * Your code goes here
     */
+	/*
+	memberNode->bFailed = false;
+	memberNode->inited = false;
+	memberNode->inGroup = false;
+	memberNode->nnb = 0;
+	memberNode->heartbeat = 0;
+	memberNode->pingCounter = 0;
+	memberNode->timeOutCounter = -1;
+	memberNode->memberList.clear();
+	*/
+
+	return 1;
 }
 
 /**
@@ -209,6 +309,35 @@ void MP1Node::checkMessages() {
     return;
 }
 
+void MP1Node::addMembTableEntry(HeartbeatEntry* entry) {
+	MemberListEntry newMember(entry->id, entry->port, entry->heartbeat, par->getcurrtime());
+	memberNode->memberList.push_back(newMember);
+
+	auto neighbour = makeAddress(entry->id, entry->port);
+	log->logNodeAdd(&(memberNode->addr), &neighbour);
+}
+
+
+void MP1Node::updateMembTableEntry(HeartbeatEntry* entry) {
+	if(memberNode->addr == makeAddress(entry->id, entry->port))
+		return;
+	bool done = false;
+	for(auto& tblEntry : memberNode->memberList) {
+		if (tblEntry.id == entry->id && tblEntry.port == entry->port) {
+			if(tblEntry.heartbeat < entry->heartbeat) {
+				tblEntry.heartbeat = entry->heartbeat;
+				tblEntry.timestamp = par->getcurrtime();
+			}
+			done = true;
+			break;
+		}
+	}
+	if(!done) {
+		addMembTableEntry(entry);
+	}
+}
+
+
 /**
  * FUNCTION NAME: recvCallBack
  *
@@ -218,6 +347,36 @@ bool MP1Node::recvCallBack(void *env, char *data, int size ) {
 	/*
 	 * Your code goes here
 	 */
+	MessageHdr *header = (MessageHdr *)data;
+	char msgType = header->msgType;
+	int numEntries = header->numEntries;
+
+	char *ptr = data + SIZEOF_HEADER;
+
+	if (msgType == JOINREQ) {
+		HeartbeatEntry* entry = (HeartbeatEntry *)(ptr);
+		Address newNodeAddr = makeAddress(entry->id, entry->port);
+
+		int msgLen = 0;
+		char* msg = prepMsgForSharingMemberTable(JOINREP, msgLen);
+        	emulNet->ENsend(&memberNode->addr, &newNodeAddr, msg, msgLen);
+	        free(msg);
+
+		addMembTableEntry(entry);
+
+		return true;
+	}
+
+	for(int i=0; i < numEntries; ++i) {
+		HeartbeatEntry* entry = (HeartbeatEntry *)(ptr);
+		updateMembTableEntry(entry);
+		ptr += SIZEOF_HBENTRY;
+	}
+
+	if (msgType == JOINREP) {
+		memberNode->inGroup = true;
+	}
+	return true;
 }
 
 /**
@@ -228,12 +387,38 @@ bool MP1Node::recvCallBack(void *env, char *data, int size ) {
  * 				Propagate your membership list
  */
 void MP1Node::nodeLoopOps() {
+	auto& membTable = memberNode->memberList;
+	size_t tblSize = membTable.size(), i = 0;
 
-	/*
-	 * Your code goes here
-	 */
+	// Remove entry after T-cleanup (TREMOVE)
+	while(i < tblSize) {
+		if(par->getcurrtime() > membTable[i].timestamp + TREMOVE) {
+			auto addr = makeAddress(membTable[i].id, membTable[i].port);
+			log->logNodeRemove(&memberNode->addr, &addr);
+			membTable.erase(membTable.begin() +i);
+			--tblSize;
+		} else {
+			++i;
+		}
+	}
 
-    return;
+	// Increment node's heartbeat
+	memberNode->heartbeat++;
+
+	int msgLen = 0;
+	char* msg = prepMsgForSharingMemberTable(MEMB_TABLE, msgLen);
+
+	// Send member table to randomly selected neighbours
+	for(i=0; i < NUM_NBRS && i < tblSize; ++i) {
+		int idx = std::rand() % tblSize;
+		auto neighbour = makeAddress(membTable[idx].id, membTable[idx].port);
+        	emulNet->ENsend(&memberNode->addr, &neighbour, msg, msgLen);
+
+	}
+
+	free(msg);
+
+	return;
 }
 
 /**
